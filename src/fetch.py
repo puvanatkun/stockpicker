@@ -34,6 +34,10 @@ CREATE TABLE IF NOT EXISTS fundamentals (
     roe REAL,
     fcf_yield REAL,
     dividend_yield REAL,
+    payout_ratio REAL,
+    years_paid_dividends INTEGER,
+    price_52w_high REAL,
+    drawdown_52w REAL,
     fetched_at TEXT
 );
 CREATE TABLE IF NOT EXISTS prices (
@@ -54,9 +58,27 @@ CREATE TABLE IF NOT EXISTS picks_history (
 """
 
 
+_NEW_COLS = [
+    ("payout_ratio", "REAL"),
+    ("years_paid_dividends", "INTEGER"),
+    ("price_52w_high", "REAL"),
+    ("drawdown_52w", "REAL"),
+]
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add new fundamentals columns to existing DBs that pre-date them."""
+    for col, typ in _NEW_COLS:
+        try:
+            conn.execute(f"ALTER TABLE fundamentals ADD COLUMN {col} {typ}")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+
+
 def connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
 
 
@@ -70,7 +92,7 @@ def _safe(d: dict, key: str) -> float | None:
         return None
 
 
-def _extract_fundamentals(ticker: str, market: str, info: dict) -> dict:
+def _extract_fundamentals(ticker: str, market: str, info: dict, hist: pd.DataFrame | None) -> dict:
     market_cap = _safe(info, "marketCap")
     fcf = _safe(info, "freeCashflow")
     fcf_yield = (fcf / market_cap) if (fcf and market_cap and market_cap > 0) else None
@@ -79,6 +101,25 @@ def _extract_fundamentals(ticker: str, market: str, info: dict) -> dict:
     div_yield = _safe(info, "dividendYield")
     if div_yield is not None:
         div_yield = div_yield / 100
+
+    payout_ratio = _safe(info, "payoutRatio")
+
+    # Derived from price/dividend history
+    years_paid = None
+    price_52w_high = None
+    drawdown_52w = None
+    if hist is not None and not hist.empty:
+        closes = hist["Close"].dropna()
+        if len(closes) >= 6:
+            last_12 = closes.tail(12)
+            price_52w_high = float(last_12.max())
+            current = float(closes.iloc[-1])
+            drawdown_52w = (current - price_52w_high) / price_52w_high if price_52w_high > 0 else None
+        if "Dividends" in hist.columns:
+            divs = hist["Dividends"].fillna(0)
+            annual = divs.groupby(divs.index.year).sum()
+            recent_5 = annual.tail(5)
+            years_paid = int((recent_5 > 0).sum())
 
     return {
         "ticker": ticker,
@@ -94,6 +135,10 @@ def _extract_fundamentals(ticker: str, market: str, info: dict) -> dict:
         "roe": _safe(info, "returnOnEquity"),
         "fcf_yield": fcf_yield,
         "dividend_yield": div_yield,
+        "payout_ratio": payout_ratio,
+        "years_paid_dividends": years_paid,
+        "price_52w_high": price_52w_high,
+        "drawdown_52w": drawdown_52w,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -104,13 +149,17 @@ def _fetch_one(ticker: str, market: str, want_history: bool) -> tuple[dict | Non
         info = t.info or {}
         if not info or not info.get("symbol"):
             return None, None
-        fund = _extract_fundamentals(ticker, market, info)
-        hist = None
-        if want_history:
-            h = t.history(period="3y", interval="1mo", auto_adjust=True)
-            if not h.empty:
-                hist = pd.DataFrame({"ticker": ticker, "date": h.index.strftime("%Y-%m-%d"), "close": h["Close"].values})
-        return fund, hist
+        # 5y monthly history with dividends so we can compute consistency + drawdown
+        h = t.history(period="5y", interval="1mo", auto_adjust=False, actions=True)
+        fund = _extract_fundamentals(ticker, market, info, h if not h.empty else None)
+        hist_out = None
+        if want_history and not h.empty:
+            hist_out = pd.DataFrame({
+                "ticker": ticker,
+                "date": h.index.strftime("%Y-%m-%d"),
+                "close": h["Close"].values,
+            })
+        return fund, hist_out
     except Exception as e:  # noqa: BLE001
         log.warning("fetch %s failed: %s", ticker, e)
         return None, None

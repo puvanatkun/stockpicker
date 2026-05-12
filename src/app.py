@@ -81,7 +81,7 @@ with st.sidebar.expander("Manual refresh"):
 
 page = st.sidebar.radio(
     "Page",
-    ["Top Picks", "Full Ranking", "Stock Detail", "Backtest", "Settings"],
+    ["Top Picks", "Dividend Value", "Full Ranking", "Stock Detail", "Backtest", "Settings"],
     label_visibility="collapsed",
 )
 
@@ -141,6 +141,69 @@ if page == "Top Picks":
         "Download picks as CSV",
         top.to_csv(index=False).encode(),
         file_name=f"picks_{datetime.now().strftime('%Y%m%d')}.csv",
+        mime="text/csv",
+    )
+
+
+# ---------- Page: Dividend Value ----------
+elif page == "Dividend Value":
+    st.title("Dividend Value")
+    st.caption(
+        "Consistent dividend payers that have fallen in price but still score well on value. "
+        "Filters: yield ≥ 2.5%, paid dividends 4+ of last 5 years, sustainable payout ratio, "
+        "down 8–40% from 52-week high."
+    )
+
+    if "years_paid_dividends" not in scored.columns or scored["years_paid_dividends"].isna().all():
+        st.warning(
+            "Dividend history isn't in the cache yet. Trigger the **Weekly data refresh** "
+            "GitHub Action (or run `python src/run_weekly.py` locally) to populate it."
+        )
+        st.stop()
+
+    with st.expander("Adjust filters"):
+        min_yield = st.slider("Min dividend yield", 0.0, 0.10, 0.025, 0.005, format="%.3f")
+        min_years = st.slider("Min years paid (of last 5)", 1, 5, 4)
+        max_payout = st.slider("Max payout ratio", 0.30, 1.50, 0.85, 0.05)
+        dd_low, dd_high = st.slider(
+            "52-week drawdown range",
+            min_value=-0.60, max_value=0.0, value=(-0.40, -0.08), step=0.02,
+        )
+
+    picks = score.dividend_value_screen(
+        scored, n=10,
+        min_yield=min_yield, min_years_paid=min_years,
+        max_payout=max_payout, drawdown_range=(dd_low, dd_high),
+    )
+
+    if picks.empty:
+        st.info("No tickers pass the screen with these filters. Try loosening them.")
+        st.stop()
+
+    for i, row in picks.iterrows():
+        with st.container(border=True):
+            st.markdown(f"### `{row['ticker']}` — {row['name']}")
+            st.caption(f"{row['market']} · {row.get('sector', '')}")
+            st.markdown(f"**Why:** {row['reason']}")
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Dividend yield", _format_pct(row["dividend_yield"]))
+            c2.metric("52w drawdown", _format_pct(row.get("drawdown_52w")))
+            c3.metric("Value score", f"{row['score']:.2f}")
+
+            with st.expander("More detail"):
+                d1, d2, d3 = st.columns(3)
+                d1.metric("Price", _format_num(row.get("price"), 2))
+                d2.metric("52w high", _format_num(row.get("price_52w_high"), 2))
+                d3.metric("Years paid (last 5)", int(row.get("years_paid_dividends") or 0))
+                d1.metric("Payout ratio", _format_pct(row.get("payout_ratio")))
+                d2.metric("P/E", _format_num(row.get("pe")))
+                d3.metric("FCF yield", _format_pct(row.get("fcf_yield")))
+
+    st.download_button(
+        "Download as CSV",
+        picks.to_csv(index=False).encode(),
+        file_name=f"dividend_value_{datetime.now().strftime('%Y%m%d')}.csv",
         mime="text/csv",
     )
 

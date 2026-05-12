@@ -114,6 +114,75 @@ def build_reason(row: pd.Series, top_n: int = 3) -> str:
     return " · ".join(parts)
 
 
+def _dividend_reason(row: pd.Series) -> str:
+    parts = [f"{row['dividend_yield'] * 100:.1f}% yield"]
+    if pd.notna(row.get("years_paid_dividends")):
+        parts.append(f"paid {int(row['years_paid_dividends'])}/5y")
+    if pd.notna(row.get("drawdown_52w")):
+        parts.append(f"down {abs(row['drawdown_52w']) * 100:.0f}% from 52w high")
+    if pd.notna(row.get("payout_ratio")) and 0 < row["payout_ratio"] <= 2:
+        parts.append(f"{row['payout_ratio'] * 100:.0f}% payout")
+    return " · ".join(parts)
+
+
+def dividend_value_screen(
+    scored: pd.DataFrame,
+    *,
+    n: int = 10,
+    min_yield: float = 0.025,
+    min_years_paid: int = 4,
+    max_payout: float = 0.85,
+    drawdown_range: tuple[float, float] = (-0.40, -0.08),
+) -> pd.DataFrame:
+    """Top dividend payers that pay consistently, have fallen in price, still good value.
+
+    Filters:
+      - dividend_yield >= 2.5%
+      - paid dividends in 4+ of last 5 years
+      - payout ratio <= 85% (sustainable; missing data treated as pass)
+      - 52w drawdown between -40% and -8% (fallen, but not catastrophic)
+      - value score >= cross-market median (still good value)
+
+    Ranking weights: 35% yield · 25% value score · 20% consistency · 20% drawdown sweet-spot.
+    """
+    df = scored.copy()
+
+    required = {"years_paid_dividends", "payout_ratio", "drawdown_52w"}
+    if not required.issubset(df.columns):
+        return df.iloc[0:0]
+
+    median_score = df["score"].median()
+    dd_lo, dd_hi = drawdown_range
+
+    payout_ok = df["payout_ratio"].le(max_payout) | df["payout_ratio"].isna()
+    mask = (
+        df["dividend_yield"].ge(min_yield).fillna(False)
+        & df["years_paid_dividends"].ge(min_years_paid).fillna(False)
+        & payout_ok
+        & df["drawdown_52w"].between(dd_lo, dd_hi).fillna(False)
+        & df["score"].ge(median_score)
+    )
+    filtered = df.loc[mask].copy()
+    if filtered.empty:
+        return filtered
+
+    yield_rank = filtered["dividend_yield"].rank(pct=True)
+    value_rank = filtered["score"].rank(pct=True)
+    consistency = (filtered["years_paid_dividends"] / 5).clip(0, 1)
+    # Drawdown sweet-spot: peaks at -20%, falls linearly to 0 at the bounds.
+    dd_attractiveness = (1 - (filtered["drawdown_52w"] - (-0.20)).abs() / 0.20).clip(0, 1)
+
+    filtered["div_value_score"] = (
+        0.35 * yield_rank
+        + 0.25 * value_rank
+        + 0.20 * consistency
+        + 0.20 * dd_attractiveness
+    )
+    top = filtered.sort_values("div_value_score", ascending=False).head(n).copy()
+    top["reason"] = top.apply(_dividend_reason, axis=1)
+    return top
+
+
 def top_n_combined(scored: pd.DataFrame, n: int = 5) -> pd.DataFrame:
     """Top N tickers across both markets, with a human-readable reason column."""
     top = scored.head(n).copy()
