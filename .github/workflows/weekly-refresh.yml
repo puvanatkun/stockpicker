@@ -1,0 +1,40 @@
+name: Weekly data refresh
+
+on:
+  schedule:
+    # Mondays at 21:00 UTC == Tuesday 07:00 AEST / 08:00 AEDT
+    - cron: "0 21 * * 1"
+  workflow_dispatch:  # allow manual trigger from the Actions tab
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run weekly refresh
+        run: python src/run_weekly.py
+
+      - name: Commit refreshed cache
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/cache.db data/picks_history.csv data/latest_picks.json data/sp500.csv data/asx200.csv
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Weekly data refresh ($(date -u +%Y-%m-%d))"
+            git push
+          fi
