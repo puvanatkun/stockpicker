@@ -18,7 +18,8 @@ import score
 from backtest import run_backtest
 from universe import build_universe
 
-st.set_page_config(page_title="Value Stock Picker", layout="wide", page_icon=":chart_with_upwards_trend:")
+LOGO_PATH = Path(__file__).resolve().parent.parent / "assets" / "logo.png"
+st.set_page_config(page_title="Value Stock Picker", layout="wide", page_icon=str(LOGO_PATH))
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
